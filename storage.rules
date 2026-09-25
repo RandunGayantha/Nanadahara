@@ -1,0 +1,39 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // No Cloud Functions in this project (Spark/free plan), so there are no
+    // Auth custom claims — role lives only in Firestore.
+    function myRole() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && myRole() == 'admin';
+    }
+
+    function isTeacherOfClass(classId) {
+      return isSignedIn() && myRole() == 'teacher' &&
+        firestore.get(/databases/(default)/documents/classes/$(classId)).data.teacherId == request.auth.uid;
+    }
+
+    function isStudentInClass(classId) {
+      return isSignedIn() && myRole() == 'student' &&
+        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.classId == classId;
+    }
+
+    // materials/{classId}/{fileName} — teachers upload notes/papers for
+    // their own class; students in that class can only read.
+    match /materials/{classId}/{fileName} {
+      allow read: if isAdmin() || isTeacherOfClass(classId) || isStudentInClass(classId);
+      allow write: if (isAdmin() || isTeacherOfClass(classId)) &&
+        request.resource.size < 25 * 1024 * 1024 &&
+        request.resource.contentType.matches('application/pdf|image/.*');
+    }
+  }
+}

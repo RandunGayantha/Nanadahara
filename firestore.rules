@@ -1,0 +1,168 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // No Cloud Functions in this project (Spark/free plan), so there are no
+    // Auth custom claims — role lives only in Firestore, read here instead.
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && myRole() == 'admin';
+    }
+
+    function isTeacher() {
+      return isSignedIn() && myRole() == 'teacher';
+    }
+
+    function isStudent() {
+      return isSignedIn() && myRole() == 'student';
+    }
+
+    function myClassId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.classId;
+    }
+
+    function isTeacherOfClass(classId) {
+      return isTeacher() &&
+        get(/databases/$(database)/documents/classes/$(classId)).data.teacherId == request.auth.uid;
+    }
+
+    // ---------------------------------------------------------------------
+    // users/{uid} — each user reads/writes only their own doc; admin has
+    // full access. A teacher may additionally change ONLY the `classId`
+    // field of a student in their own class (this is how "add a student to
+    // my class" works client-side, with no server function to broker it).
+    // ---------------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if isAdmin() || request.auth.uid == uid;
+      allow create: if isAdmin();
+      allow update: if isAdmin() ||
+        (request.auth.uid == uid &&
+         request.resource.data.role == resource.data.role &&
+         request.resource.data.classId == resource.data.classId) ||
+        (resource.data.role == 'student' &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['classId']) &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // adminCredentials/{uid} — usernames & temporary passwords. Admin-only,
+    // no exceptions, never readable by students or teachers.
+    // ---------------------------------------------------------------------
+    match /adminCredentials/{uid} {
+      allow read, write: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // settings/{docId} — app-wide config (e.g. the TextBee SMS gateway API
+    // key/device id). Admin-only; the /api functions read it with the Admin
+    // SDK, which bypasses these rules entirely, so this only governs the
+    // admin Settings UI's own read/write.
+    // ---------------------------------------------------------------------
+    match /settings/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // classes/{classId}
+    // ---------------------------------------------------------------------
+    match /classes/{classId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isStudent() && request.auth.uid in resource.data.studentIds);
+      allow create: if isAdmin();
+      allow update: if isAdmin() ||
+        (isTeacher() &&
+         resource.data.teacherId == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentIds']));
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // materials/{materialId} — teachers manage their own class's materials;
+    // students have read-only access to their own class's materials.
+    // ---------------------------------------------------------------------
+    match /materials/{materialId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isStudent() && resource.data.classId == myClassId());
+      allow create: if isAdmin() ||
+        (isTeacher() &&
+         request.resource.data.teacherId == request.auth.uid &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow update, delete: if isAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid);
+    }
+
+    // ---------------------------------------------------------------------
+    // marks/{markId} — teachers enter marks for their own class; students
+    // have read-only access to their own marks.
+    // ---------------------------------------------------------------------
+    match /marks/{markId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && isTeacherOfClass(resource.data.classId)) ||
+        (isStudent() && resource.data.studentId == request.auth.uid);
+      allow create: if isAdmin() ||
+        (isTeacher() &&
+         request.resource.data.enteredBy == request.auth.uid &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow update, delete: if isAdmin() ||
+        (isTeacher() && isTeacherOfClass(resource.data.classId));
+    }
+
+    // ---------------------------------------------------------------------
+    // attendance/{attendanceId} — one doc per class per day; teachers mark
+    // their own class, students have read-only access to their own class.
+    // ---------------------------------------------------------------------
+    match /attendance/{attendanceId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && isTeacherOfClass(resource.data.classId)) ||
+        (isStudent() && resource.data.classId == myClassId());
+      allow create, update: if isAdmin() ||
+        (isTeacher() &&
+         request.resource.data.markedBy == request.auth.uid &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // fees/{feeId} — admin/teacher record payments for their own class;
+    // students have read-only access to their own fee records.
+    // ---------------------------------------------------------------------
+    match /fees/{feeId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && isTeacherOfClass(resource.data.classId)) ||
+        (isStudent() && resource.data.studentId == request.auth.uid);
+      allow create: if isAdmin() ||
+        (isTeacher() &&
+         request.resource.data.paidBy == request.auth.uid &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------------
+    // announcements/{announcementId} — teachers post messages to their own
+    // class; students have read-only access to their own class's messages.
+    // ---------------------------------------------------------------------
+    match /announcements/{announcementId} {
+      allow read: if isAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isStudent() && resource.data.classId == myClassId());
+      allow create: if isAdmin() ||
+        (isTeacher() &&
+         request.resource.data.teacherId == request.auth.uid &&
+         isTeacherOfClass(request.resource.data.classId));
+      allow delete: if isAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid);
+      allow update: if isAdmin();
+    }
+  }
+}
