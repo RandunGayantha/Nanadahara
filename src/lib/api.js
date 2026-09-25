@@ -19,20 +19,24 @@ async function callApi(path, body) {
     body: JSON.stringify(body),
   })
 
-  // `npm run dev` (plain Vite) doesn't serve /api at all, so this request
-  // 404s against something that isn't our JSON handler (Vite's dev server,
-  // or a static host with no matching route) — surface that distinctly
-  // instead of a generic error, since it's the most likely failure mode
-  // until this is deployed to Vercel (or run locally via `vercel dev`).
-  const contentType = res.headers.get('content-type') || ''
-  if (!contentType.includes('application/json')) {
+  // A non-JSON response means the request never reached our handler's own
+  // try/catch — either `npm run dev` (plain Vite doesn't serve /api at all,
+  // so this 404s against nothing) or, on an actual Vercel deployment, a
+  // platform-level function crash (bad bundling, missing env vars the code
+  // didn't defensively check, a timeout, etc). Surface the raw body so the
+  // real cause is visible instead of guessing which case it is.
+  const rawText = await res.text()
+  let data
+  try {
+    data = rawText ? JSON.parse(rawText) : {}
+  } catch {
     throw new Error(
-      `/api/${path} isn't reachable (status ${res.status}, non-JSON response). The /api functions only run ` +
-        "under Vercel — use `vercel dev` locally, or deploy this project, for this to work."
+      `/api/${path} returned a non-JSON response (status ${res.status}): ${
+        rawText.slice(0, 300) || '(empty body)'
+      }`
     )
   }
 
-  const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new Error(data.error || 'Request failed')
   }
